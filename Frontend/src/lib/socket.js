@@ -1,24 +1,35 @@
 import { io } from 'socket.io-client';
 
-let socket = null;
+let socket;
 
-export function createSocket(token) {
-  if (socket) return socket;
+export function ensureSocket() {
+  if (socket && socket.connected) return socket;
+  const token = localStorage.getItem('token');
   const API = import.meta.env.VITE_API_URL || 'http://localhost:4000';
-  socket = io(API, { auth: { token }, autoConnect: true });
-  socket.on('connect', () => console.log('socket connected', socket.id));
-  socket.on('connect_error', (err) => console.error('socket connect_error', err.message));
+
+  socket = io(API, {
+    auth: { token },
+    autoConnect: true,
+    reconnection: true,
+    reconnectionAttempts: 8,
+    reconnectionDelay: 500,
+    transports: ['websocket', 'polling']
+  });
+
+  socket.on('connect', () => console.log('[socket] connected', socket.id));
+  socket.on('connect_error', (e) => console.warn('[socket] connect_error', e.message));
+  socket.on('reconnect_attempt', (n)=> console.log('[socket] reconnect_attempt', n));
   return socket;
 }
 
 export function getSocket() {
-  if (!socket) throw new Error('Socket not initialized. Call createSocket(token) first.');
+  if (!socket) throw new Error('Socket not initialized');
   return socket;
 }
 
-export function disconnectSocket() {
-  if (socket) {
-    socket.disconnect();
-    socket = null;
-  }
+export function requestDoctorSync() {
+  return new Promise((resolve) => {
+    const s = ensureSocket();
+    s.emit('doctor:sync', (res) => resolve(res));
+  });
 }

@@ -1,1 +1,40 @@
 @import "tailwindcss";
+
+
+:root {
+  color-scheme: dark;
+
+  --bg: #0b1220;       /* page */
+  --panel: #0f172a;    /* cards */
+  --soft: #1e293b;     /* soft surfaces */
+  --line: #1f2a44;     /* borders */
+  --text: #e5e7eb;     /* primary text */
+  --sub: #94a3b8;      /* secondary text */
+  --brand: #22d3ee;    /* cyan */
+  --danger: #ef4444;
+  --ok: #22c55e;
+}
+
+html, body, #root { height: 100%; }
+body { background: var(--bg); color: var(--text); }
+
+/* ===== Small helpers you can reuse ===== */
+.app-shell { @apply min-h-screen; }
+.app-header { @apply border-b backdrop-blur; border-color: var(--line); background: color-mix(in oklab, var(--panel) 85%, transparent); }
+.app-wrap { @apply max-w-6xl mx-auto px-4; }
+.tabs a {
+  @apply px-3 py-1.5 rounded-lg border text-sm;
+  border-color: var(--line); background: var(--panel); color: var(--sub);
+}
+.tabs a.active { background: color-mix(in oklab, var(--brand) 20%, var(--panel) 80%); border-color: color-mix(in oklab, var(--brand) 40%, var(--line) 60%); color: var(--text); }
+.card { @apply rounded-2xl p-4 border; background: var(--panel); border-color: var(--line); }
+.pill { @apply inline-block text-xs px-2 py-1 rounded-full; background: var(--soft); color: var(--sub); }
+.btn { @apply px-4 py-2 rounded-lg; }
+.btn-ok { background: var(--ok); color: #000; }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-ghost { @apply border; border-color: var(--line); background: var(--panel); color: var(--sub); }
+.input, .textarea, .select { @apply w-full rounded-lg border px-3 py-2 text-sm; background: var(--panel); border-color: var(--line); color: var(--text); }
+.label { @apply text-sm font-semibold; color: var(--sub); }
+.small { @apply text-xs; color: var(--sub); }
+
+.chart-card { @apply p-3; }

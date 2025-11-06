@@ -1,48 +1,76 @@
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
+const AIReport = require('./models/AIReport');
+const User = require('./models/User');
 
-let ioInstance = null;
+let io;
 
-function initSocket(server) {
-  if (ioInstance) return ioInstance;
-  const io = new Server(server, {
-    cors: { origin: '*' } // tighten in prod
+function init(server) {
+  io = new Server(server, {
+    cors: {
+      origin: process.env.FRONTEND_ORIGIN || '*',
+      credentials: true
+    },
+    transports: ['websocket', 'polling'],
+    pingTimeout: 15000,
+    pingInterval: 12000
   });
 
-  // middleware for auth on connection
   io.use((socket, next) => {
     try {
-      const token = socket.handshake.auth?.token;
-      if (!token) return next(new Error('Authentication error: token missing'));
-      const payload = jwt.verify(token, process.env.JWT_SECRET);
-      socket.user = payload; // { id, role }
+      const token = socket.handshake.auth?.token || socket.handshake.headers?.authorization?.split(' ')[1];
+      if (!token) return next(new Error('No token'));
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      socket.user = { id: decoded.id, role: decoded.role };
       return next();
-    } catch (err) {
-      return next(new Error('Authentication error'));
+    } catch (e) {
+      return next(new Error('Auth failed'));
     }
   });
 
-  io.on('connection', (socket) => {
-    const { id: userId, role } = socket.user || {};
-    console.log(`Socket connected: user=${userId} role=${role} sid=${socket.id}`);
+  io.on('connection', async (socket) => {
+    const { id, role } = socket.user || {};
     // rooms
-    if (role === 'doctor') socket.join('doctors');
-    socket.join(`patient:${userId}`);
-    socket.join(`user:${userId}`);
+    socket.join(`user:${id}`);
+    if (role === 'doctor' || role === 'admin') socket.join('doctors');
 
-    socket.on('disconnect', () => {
-      console.log('Socket disconnected:', socket.id);
+    // on-connect: quick sync for doctors -> send latest 10 pending reports
+    if (role === 'doctor' || role === 'admin') {
+      try {
+        const reports = await AIReport.find({ status: 'pending' })
+          .populate('patient', 'name age gender weight pmh allergies')
+          .sort({ createdAt: -1 })
+          .limit(10)
+          .lean();
+        socket.emit('doctor:init', { reports });
+      } catch (e) {
+        socket.emit('doctor:init', { reports: [] });
+      }
+    }
+
+    // client can request resync anytime
+    socket.on('doctor:sync', async (ack) => {
+      try {
+        const reports = await AIReport.find({ status: 'pending' })
+          .populate('patient', 'name age gender weight pmh allergies')
+          .sort({ createdAt: -1 })
+          .limit(20)
+          .lean();
+        ack && ack({ ok: true, reports });
+      } catch (e) {
+        ack && ack({ ok: false, error: e.message });
+      }
     });
+
+    socket.on('disconnect', () => {});
   });
 
-  ioInstance = io;
   return io;
 }
 
-// convenience getter for controllers
 function getIO() {
-  if (!ioInstance) throw new Error('Socket.io not initialized. Call initSocket(server) first.');
-  return ioInstance;
+  if (!io) throw new Error('io not initialized');
+  return io;
 }
 
-module.exports = { initSocket, getIO };
+module.exports = { init, getIO };
