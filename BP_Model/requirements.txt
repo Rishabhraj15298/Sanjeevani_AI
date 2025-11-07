@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pandas
+scikit-learn
+pyxlsb
+openpyxl
+fuzzywuzzy
+python-levenshtein

@@ -343,6 +343,8 @@ import Shell from '../../components/Shell';
 import api from '../../services/api';
 import { ensureSocket } from '../../lib/socket';
 import toast from 'react-hot-toast';
+import AIPlan from '../../components/AIPlan';
+import ImageUploader from '../../components/ImageUploader';
 
 // symptom options
 const SYMPTOM_OPTIONS = [
@@ -753,6 +755,20 @@ export default function Chatbot() {
         />
         <button className="btn btn-ok" onClick={handleSend} disabled={loading}>{loading ? '...' : 'Send'}</button>
       </div>
+      <ImageUploader onDetected={(res) => {
+  if (res?.error) {
+    pushMessage({ sender: 'system', type:'text', content:{ text: 'Image OCR failed. Enter values manually.' }, createdAt: nowISO() }, true);
+    return;
+  }
+  const parsed = res.parsed;
+  pushMessage({ sender:'system', type:'text', content:{ text: `Detected: ${parsed.systolic || '—'}/${parsed.diastolic || '—'} mmHg, pulse ${parsed.pulse || '—'}. Confirm to submit.` }, createdAt: nowISO() }, true);
+  // prefill your formRef
+  formRef.current.systolic = parsed.systolic || '';
+  formRef.current.diastolic = parsed.diastolic || '';
+  formRef.current.pulse = parsed.pulse || null;
+  setShowSymptomsPanel(true);
+}}/>
+
     </Shell>
   );
 }

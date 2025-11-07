@@ -290,15 +290,25 @@
 // };
 
 
+// const { validationResult } = require('express-validator');
+// const path = require('path');
+// const BPReading = require('../models/BPReading');
+// const AIReport = require('../models/AIReport');
+// const ApprovedReport = require('../models/ApprovedReport');
+// const Attachment = require('../models/Attachment');
+// const User = require('../models/User');
+// const { getIO } = require('../socket');
+// const { generateAIReportFromReadings } = require('../services/gemini');
+
 const { validationResult } = require('express-validator');
-const path = require('path');
 const BPReading = require('../models/BPReading');
 const AIReport = require('../models/AIReport');
 const ApprovedReport = require('../models/ApprovedReport');
-const Attachment = require('../models/Attachment');
 const User = require('../models/User');
 const { getIO } = require('../socket');
-const { generateAIReportFromReadings } = require('../services/gemini');
+const { generateAIReportFromReadings } = require('../services/gemini'); // your existing service
+const { callAdaptiveModel } = require('../services/adaptive');
+const { parseBPFromTextServer } = require('../utils/parseBPFromTextServer');
 
 // POST /api/patient/reading
 // src/controllers/patientController.js
@@ -307,9 +317,7 @@ exports.addReading = async (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    // pull fields (conversationId optional)
-    const { systolic, diastolic, pulse, symptoms, measuredAt, notes } = req.body;
-    const conversationId = req.body.conversationId || null;
+    const { systolic, diastolic, pulse, symptoms, measuredAt, notes, conversationId } = req.body;
 
     // 1) Save reading
     const reading = await BPReading.create({
@@ -321,7 +329,7 @@ exports.addReading = async (req, res, next) => {
       measuredAt: measuredAt ? new Date(measuredAt) : Date.now()
     });
 
-    // 2) Emit reading to doctors immediately (so they can see incoming readings)
+    // 2) Emit reading to doctors immediately
     try {
       const io = getIO();
       io.to('doctors').emit('reading:created', {
@@ -333,86 +341,100 @@ exports.addReading = async (req, res, next) => {
         symptoms: reading.symptoms,
         measuredAt: reading.measuredAt
       });
-    } catch (emitErr) {
-      console.error('emit reading:created failed', emitErr);
-    }
+    } catch (_) {}
 
-    // 3) Nudge logic: encourage 5 readings/week (non-fatal)
-    try {
-      const sinceWeek = new Date();
-      sinceWeek.setDate(sinceWeek.getDate() - 7);
-      const count = await BPReading.countDocuments({
-        patient: req.user.id,
-        measuredAt: { $gte: sinceWeek }
-      });
-      const io = getIO();
-      if (count < 5) {
-        io.to(`user:${req.user.id}`).emit('nudge:keep-going', {
-          target: 5,
-          current: count,
-          message: `Great! ${count}/5 readings this week. Add ${5 - count} more for a better assessment.`
-        });
-      }
-    } catch (e) {
-      console.error('nudge emit failed', e?.message || e);
-    }
-
-    // 4) Async AI generation & persistence (non-blocking)
+    // 3) Non-blocking AI generation & ML call
     (async () => {
       try {
-        // fetch readings for the last 7 days (or adjust window)
-        const since = new Date();
-        since.setDate(since.getDate() - 7);
+        // recent week readings (ordered oldest->newest)
+        const since = new Date(); since.setDate(since.getDate() - 7);
         const recent = await BPReading.find({
           patient: req.user.id,
           measuredAt: { $gte: since }
-        }).sort({ measuredAt: 1 });
+        }).sort({ measuredAt: 1 }).lean();
 
-        // last three (newest -> oldest in array)
-        const lastThree = [...recent].slice(-3).reverse().map(r => ({
-          systolic: r.systolic,
-          diastolic: r.diastolic,
-          pulse: r.pulse ?? null,
-          measuredAt: r.measuredAt
+        const lastThree = recent.slice(-3).reverse().map(r => ({
+          systolic: r.systolic, diastolic: r.diastolic, pulse: r.pulse ?? null, measuredAt: r.measuredAt
         }));
 
-        // patient context for the AI prompt
+        // patient info
         const p = await User.findById(req.user.id).lean();
         const patientInfo = p ? {
-          name: p.name,
-          age: p.age ?? null,
-          gender: p.gender ?? null,
-          weight: p.weight ?? null,
-          pmh: p.pmh ?? [],
-          allergies: p.allergies ?? []
+          name: p.name, age: p.age ?? null, gender: p.gender ?? null, weight: p.weight ?? null,
+          pmh: p.pmh ?? [], allergies: p.allergies ?? [], current_med: p.current_med || ''
         } : {};
 
-        // call Gemini / rules wrapper
-        const aiRes = await generateAIReportFromReadings({
-          readings: recent,
-          extraNotes: notes,
-          patientInfo,
-          lastThree,
-          conversationId
-        });
+        // prepare adaptive input - use latest reading if available
+        const last = lastThree[0] || recent[recent.length - 1] || {};
+        const adaptivePayload = {
+          systolic: last.systolic || reading.systolic || null,
+          diastolic: last.diastolic || reading.diastolic || null,
+          current_med: patientInfo.current_med || '',
+          response: ''
+        };
 
-        // persist AIReport including conversationId
+        // run Gemini and Adaptive in parallel (safe)
+        const [geminiRes, adaptiveRes] = await Promise.allSettled([
+          generateAIReportFromReadings({ readings: recent, extraNotes: notes, patientInfo, lastThree, conversationId }),
+          callAdaptiveModel(adaptivePayload)
+        ]);
+
+        // normalize gemini result
+        let geminiContent = {};
+        let geminiMeta = { generatedBy: 'rules' };
+        if (geminiRes.status === 'fulfilled' && geminiRes.value) {
+          geminiContent = geminiRes.value.content || {};
+          geminiMeta = { generatedBy: geminiRes.value.generatedBy || 'gemini', inputContext: geminiRes.value.inputContext || {} };
+        } else {
+          // fallback: create minimal summary using parse helper if possible
+          geminiContent = geminiRes.reason ? {} : {};
+          geminiContent.summary = geminiContent.summary || `Auto-generated summary unavailable. Last reading ${reading.systolic}/${reading.diastolic}.`;
+        }
+
+        // normalize adaptive result
+        let mlRecommendation = null;
+        if (adaptiveRes.status === 'fulfilled' && adaptiveRes.value && adaptiveRes.value.ok) {
+          const r = adaptiveRes.value;
+          mlRecommendation = {
+            ok: true,
+            predictedGroup: r.predictedGroup,
+            newGroup: r.newGroup,
+            confidence: r.confidence,
+            recommendedClass: r.recommendedClass,
+            suggestedBrands: r.suggestedBrands,
+            clinicalNote: r.clinicalNote,
+            raw: r.raw
+          };
+        } else {
+          mlRecommendation = { ok: false, error: adaptiveRes.reason || adaptiveRes.value?.error || 'ml_failed' };
+        }
+
+        // Compose persisted AIReport content
+        const content = {
+          ...geminiContent,
+          _meta: {
+            gemini: geminiMeta,
+            adaptive: mlRecommendation
+          },
+          ml_recommendation: mlRecommendation // easy top-level access
+        };
+
         const aiReport = await AIReport.create({
           patient: req.user.id,
-          generatedBy: aiRes.generatedBy || 'gemini',
-          inputContext: aiRes.inputContext || {},
-          content: aiRes.content || {},
+          generatedBy: geminiMeta.generatedBy || 'gemini',
+          inputContext: geminiMeta.inputContext || {},
+          content,
           status: 'pending',
           conversationId: conversationId || null
         });
 
-        // emit enriched payload to doctors (left pane + right pane info)
+        // emit enriched payload to doctors
         try {
           const io = getIO();
           io.to('doctors').emit('ai_report:generated', {
-            aiReportId: aiReport._id,
+            aiReportId: aiReport._id.toString(),
             patientId: req.user.id,
-            content: aiReport.content,
+            content: aiReport.content, // contains gemini + ml_recommendation
             patientDetails: patientInfo,
             conversationId: aiReport.conversationId,
             createdAt: aiReport.createdAt
@@ -420,18 +442,17 @@ exports.addReading = async (req, res, next) => {
         } catch (emitErr) {
           console.error('emit ai_report:generated failed', emitErr);
         }
-      } catch (aiErr) {
-        console.error('Async AI generation error:', aiErr?.message || aiErr);
+      } catch (err) {
+        console.error('Async AI generation error:', err?.message || err);
       }
     })();
 
-    // 5) Fast response to client
-    res.status(201).json({ reading, aiStatus: 'processing', conversationId: conversationId || null });
+    // 4) respondent quickly
+    res.status(201).json({ ok: true, reading, aiStatus: 'processing' });
   } catch (e) {
     next(e);
   }
 };
-
 
 // GET /api/patient/readings
 exports.getReadings = async (req, res, next) => {

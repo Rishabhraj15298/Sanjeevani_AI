@@ -63,6 +63,10 @@ router.use(auth, roles('patient'));
 const historyCtrl = require('../controllers/historyController');
 router.get('/history/reports', historyCtrl.getApprovedReportsHistory);
 // create a reading
+
+const imageCtrl = require('../controllers/imageController');
+router.post('/upload-bp-image', auth, imageCtrl.uploadBPImage);
+
 router.post('/reading', ctrl.addReading);
 
 // list readings
