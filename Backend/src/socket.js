@@ -1,4 +1,4 @@
-// src/socket.js
+
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const AIReport = require('./models/AIReport');

@@ -1,4 +1,4 @@
-// backend/src/services/adaptive.js
+
 const axios = require('axios');
 
 const ADAPTIVE_URL = process.env.ADAPTIVE_URL || 'http://127.0.0.1:8001/adaptive';
